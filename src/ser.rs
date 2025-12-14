@@ -276,6 +276,14 @@ impl Serializer {
         self.serialize_bytes_as_arrays = value;
         self
     }
+
+    /// Set to `true` to use human-readable serialization format.
+    /// When `true`, types like `Identifier` serialize as Base58 strings,
+    /// `BinaryData` as Base64 strings, etc. `false` by default.
+    pub const fn serialize_human_readable(mut self, value: bool) -> Self {
+        self.serialize_human_readable = value;
+        self
+    }
 }
 
 macro_rules! forward_to_into {
