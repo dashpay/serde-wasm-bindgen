@@ -9,6 +9,7 @@ use super::{static_str_to_js, Error, ObjectExt, Result};
 /// Provides [`de::SeqAccess`] from any JS iterator.
 struct SeqAccess {
     iter: js_sys::IntoIter,
+    is_human_readable: bool,
 }
 
 impl<'de> de::SeqAccess<'de> for SeqAccess {
@@ -19,7 +20,9 @@ impl<'de> de::SeqAccess<'de> for SeqAccess {
         seed: T,
     ) -> Result<Option<T::Value>> {
         Ok(match self.iter.next().transpose()? {
-            Some(value) => Some(seed.deserialize(Deserializer::from(value))?),
+            Some(value) => Some(seed.deserialize(
+                Deserializer::new(value).human_readable(self.is_human_readable),
+            )?),
             None => None,
         })
     }
@@ -29,13 +32,15 @@ impl<'de> de::SeqAccess<'de> for SeqAccess {
 struct MapAccess {
     iter: js_sys::IntoIter,
     next_value: Option<Deserializer>,
+    is_human_readable: bool,
 }
 
 impl MapAccess {
-    const fn new(iter: js_sys::IntoIter) -> Self {
+    const fn new(iter: js_sys::IntoIter, is_human_readable: bool) -> Self {
         Self {
             iter,
             next_value: None,
+            is_human_readable,
         }
     }
 }
@@ -48,7 +53,7 @@ impl<'de> de::MapAccess<'de> for MapAccess {
 
         Ok(match self.iter.next().transpose()? {
             Some(pair) => {
-                let (key, value) = convert_pair(pair);
+                let (key, value) = convert_pair(pair, self.is_human_readable);
                 self.next_value = Some(value);
                 Some(seed.deserialize(key)?)
             }
@@ -65,14 +70,16 @@ struct ObjectAccess {
     obj: ObjectExt,
     fields: std::slice::Iter<'static, &'static str>,
     next_value: Option<Deserializer>,
+    is_human_readable: bool,
 }
 
 impl ObjectAccess {
-    fn new(obj: ObjectExt, fields: &'static [&'static str]) -> Self {
+    fn new(obj: ObjectExt, fields: &'static [&'static str], is_human_readable: bool) -> Self {
         Self {
             obj,
             fields: fields.iter(),
             next_value: None,
+            is_human_readable,
         }
     }
 }
@@ -94,7 +101,9 @@ impl<'de> de::MapAccess<'de> for ObjectAccess {
             // double-check with an `in` operator if so.
             let is_missing_field = next_value.is_undefined() && !js_field.js_in(&self.obj);
             if !is_missing_field {
-                self.next_value = Some(Deserializer::from(next_value));
+                self.next_value = Some(
+                    Deserializer::new(next_value).human_readable(self.is_human_readable),
+                );
                 return Ok(Some(seed.deserialize(str_deserializer(field))?));
             }
         }
@@ -125,14 +134,43 @@ impl<'de> de::EnumAccess<'de> for EnumAccess {
     }
 }
 
-/// A newtype that allows using any [`JsValue`] as a [`serde::Deserializer`].
+/// A [`serde::Deserializer`] that converts [`JsValue`] into Rust types.
+#[derive(Clone)]
 pub struct Deserializer {
     value: JsValue,
+    is_human_readable: bool,
+}
+
+impl Deserializer {
+    /// Creates a new [`Deserializer`] from a [`JsValue`].
+    pub const fn new(value: JsValue) -> Self {
+        Self {
+            value,
+            is_human_readable: false,
+        }
+    }
+
+    /// Set to `true` to report as human-readable format to serde.
+    /// This affects how types like `BinaryData` are deserialized
+    /// (e.g., expecting base64 strings instead of byte arrays).
+    /// `false` by default.
+    pub const fn human_readable(mut self, value: bool) -> Self {
+        self.is_human_readable = value;
+        self
+    }
+
+    /// Creates a child deserializer that inherits settings from this one.
+    fn child(&self, value: JsValue) -> Self {
+        Self {
+            value,
+            is_human_readable: self.is_human_readable,
+        }
+    }
 }
 
 impl From<JsValue> for Deserializer {
     fn from(value: JsValue) -> Self {
-        Self { value }
+        Self::new(value)
     }
 }
 
@@ -147,9 +185,12 @@ impl<'de> IntoDeserializer<'de, Error> for Deserializer {
 }
 
 /// Destructures a JS `[key, value]` pair into a tuple of [`Deserializer`]s.
-fn convert_pair(pair: JsValue) -> (Deserializer, Deserializer) {
+fn convert_pair(pair: JsValue, is_human_readable: bool) -> (Deserializer, Deserializer) {
     let pair = pair.unchecked_into::<Array>();
-    (pair.get(0).into(), pair.get(1).into())
+    (
+        Deserializer::new(pair.get(0)).human_readable(is_human_readable),
+        Deserializer::new(pair.get(1)).human_readable(is_human_readable),
+    )
 }
 
 impl Deserializer {
@@ -245,7 +286,12 @@ impl Deserializer {
         visitor: V,
         array: &Array,
     ) -> Result<V::Value> {
-        visitor.visit_seq(SeqDeserializer::new(array.iter().map(Deserializer::from)))
+        let is_human_readable = self.is_human_readable;
+        visitor.visit_seq(SeqDeserializer::new(
+            array
+                .iter()
+                .map(move |v| Deserializer::new(v).human_readable(is_human_readable)),
+        ))
     }
 }
 
@@ -260,6 +306,10 @@ impl<'de> de::Deserializer<'de> for Deserializer {
             visitor.visit_unit()
         } else if let Some(v) = self.value.as_bool() {
             visitor.visit_bool(v)
+        } else if let Some(bytes) = self.as_bytes() {
+            // Uint8Array and ArrayBuffer should deserialize as bytes, not as sequences.
+            // This allows proper round-tripping of binary data through serde.
+            visitor.visit_byte_buf(bytes)
         } else if self.value.is_bigint() {
             match i64::try_from(self.value) {
                 Ok(v) => visitor.visit_i64(v),
@@ -470,7 +520,10 @@ impl<'de> de::Deserializer<'de> for Deserializer {
         if let Some(arr) = self.value.dyn_ref::<Array>() {
             self.deserialize_from_array(visitor, arr)
         } else if let Some(iter) = js_sys::try_iter(&self.value)? {
-            visitor.visit_seq(SeqAccess { iter })
+            visitor.visit_seq(SeqAccess {
+                iter,
+                is_human_readable: self.is_human_readable,
+            })
         } else {
             self.invalid_type(visitor)
         }
@@ -498,10 +551,13 @@ impl<'de> de::Deserializer<'de> for Deserializer {
     ///  - A Rust key-value map ([`HashMap`](std::collections::HashMap), [`BTreeMap`](std::collections::BTreeMap), etc.).
     ///  - A typed Rust structure with `#[derive(Deserialize)]`.
     fn deserialize_map<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
+        let is_human_readable = self.is_human_readable;
         match js_sys::try_iter(&self.value)? {
-            Some(iter) => visitor.visit_map(MapAccess::new(iter)),
+            Some(iter) => visitor.visit_map(MapAccess::new(iter, is_human_readable)),
             None => match self.as_object_entries() {
-                Some(arr) => visitor.visit_map(MapDeserializer::new(arr.iter().map(convert_pair))),
+                Some(arr) => visitor.visit_map(MapDeserializer::new(
+                    arr.iter().map(move |p| convert_pair(p, is_human_readable)),
+                )),
                 None => self.invalid_type(visitor),
             },
         }
@@ -522,7 +578,7 @@ impl<'de> de::Deserializer<'de> for Deserializer {
         } else {
             return self.invalid_type(visitor);
         };
-        visitor.visit_map(ObjectAccess::new(obj, fields))
+        visitor.visit_map(ObjectAccess::new(obj, fields, self.is_human_readable))
     }
 
     /// Here we try to be compatible with `serde-json`, which means supporting:
@@ -536,15 +592,15 @@ impl<'de> de::Deserializer<'de> for Deserializer {
     ) -> Result<V::Value> {
         let access = if self.value.is_string() {
             EnumAccess {
-                tag: self.value.into(),
-                payload: JsValue::UNDEFINED.into(),
+                tag: Deserializer::new(self.value).human_readable(self.is_human_readable),
+                payload: Deserializer::new(JsValue::UNDEFINED).human_readable(self.is_human_readable),
             }
         } else if let Some(entries) = self.as_object_entries() {
             if entries.length() != 1 {
                 return Err(de::Error::invalid_length(entries.length() as _, &"1"));
             }
             let entry = entries.get(0);
-            let (tag, payload) = convert_pair(entry);
+            let (tag, payload) = convert_pair(entry, self.is_human_readable);
             EnumAccess { tag, payload }
         } else {
             return self.invalid_type(visitor);
@@ -579,7 +635,7 @@ impl<'de> de::Deserializer<'de> for Deserializer {
     }
 
     fn is_human_readable(&self) -> bool {
-        false
+        self.is_human_readable
     }
 }
 

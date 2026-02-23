@@ -69,9 +69,17 @@ extern "C" {
     fn set(this: &ObjectExt, key: JsString, value: JsValue);
 }
 
-/// Converts [`JsValue`] into a Rust type.
+/// Converts [`JsValue`] into a Rust type using non-human-readable format.
 pub fn from_value<T: serde::de::DeserializeOwned>(value: JsValue) -> Result<T> {
     T::deserialize(Deserializer::from(value))
+}
+
+/// Converts [`JsValue`] into a Rust type using human-readable (JSON-compatible) format.
+///
+/// This affects how types like binary data are deserialized - expecting base64 strings
+/// instead of `Uint8Array`/`ArrayBuffer`.
+pub fn from_value_json<T: serde::de::DeserializeOwned>(value: JsValue) -> Result<T> {
+    T::deserialize(Deserializer::new(value).human_readable(true))
 }
 
 /// Converts a Rust value into a [`JsValue`].
