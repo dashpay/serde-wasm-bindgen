@@ -219,6 +219,7 @@ pub struct Serializer {
     serialize_missing_as_null: bool,
     serialize_maps_as_objects: bool,
     serialize_large_number_types_as_bigints: bool,
+    serialize_large_number_types_as_strings: bool,
     serialize_bytes_as_arrays: bool,
     serialize_human_readable: bool,
 }
@@ -230,6 +231,7 @@ impl Serializer {
             serialize_missing_as_null: false,
             serialize_maps_as_objects: false,
             serialize_large_number_types_as_bigints: false,
+            serialize_large_number_types_as_strings: false,
             serialize_bytes_as_arrays: false,
             serialize_human_readable: false,
         }
@@ -244,6 +246,7 @@ impl Serializer {
             serialize_missing_as_null: true,
             serialize_maps_as_objects: true,
             serialize_large_number_types_as_bigints: false,
+            serialize_large_number_types_as_strings: false,
             serialize_bytes_as_arrays: true,
             serialize_human_readable: false,
         }
@@ -267,6 +270,14 @@ impl Serializer {
     /// plain numbers. `false` by default.
     pub const fn serialize_large_number_types_as_bigints(mut self, value: bool) -> Self {
         self.serialize_large_number_types_as_bigints = value;
+        self
+    }
+
+    /// Set to `true` to serialize 64-bit numbers to JavaScript strings instead of
+    /// plain numbers. Takes priority over `serialize_large_number_types_as_bigints`.
+    /// `false` by default.
+    pub const fn serialize_large_number_types_as_strings(mut self, value: bool) -> Self {
+        self.serialize_large_number_types_as_strings = value;
         self
     }
 
@@ -324,6 +335,9 @@ impl<'s> ser::Serializer for &'s Serializer {
     }
 
     fn serialize_i64(self, v: i64) -> Result {
+        if self.serialize_large_number_types_as_strings {
+            return Ok(JsString::from(v.to_string()).into());
+        }
         if self.serialize_large_number_types_as_bigints {
             return Ok(v.into());
         }
@@ -344,6 +358,9 @@ impl<'s> ser::Serializer for &'s Serializer {
     }
 
     fn serialize_u64(self, v: u64) -> Result {
+        if self.serialize_large_number_types_as_strings {
+            return Ok(JsString::from(v.to_string()).into());
+        }
         if self.serialize_large_number_types_as_bigints {
             return Ok(v.into());
         }

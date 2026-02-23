@@ -435,6 +435,14 @@ impl<'de> de::Deserializer<'de> for Deserializer {
                     "Couldn't deserialize i64 from a BigInt outside i64::MIN..i64::MAX bounds",
                 )),
             }
+        } else if self.is_human_readable {
+            if let Some(s) = self.value.as_string() {
+                return match s.parse::<i64>() {
+                    Ok(v) => visitor.visit_i64(v),
+                    Err(_) => self.invalid_type(visitor),
+                };
+            }
+            self.deserialize_from_js_number_signed(visitor)
         } else {
             self.deserialize_from_js_number_signed(visitor)
         }
@@ -448,6 +456,14 @@ impl<'de> de::Deserializer<'de> for Deserializer {
                     "Couldn't deserialize u64 from a BigInt outside u64::MIN..u64::MAX bounds",
                 )),
             }
+        } else if self.is_human_readable {
+            if let Some(s) = self.value.as_string() {
+                return match s.parse::<u64>() {
+                    Ok(v) => visitor.visit_u64(v),
+                    Err(_) => self.invalid_type(visitor),
+                };
+            }
+            self.deserialize_from_js_number_unsigned(visitor)
         } else {
             self.deserialize_from_js_number_unsigned(visitor)
         }
