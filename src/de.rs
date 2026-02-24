@@ -325,38 +325,6 @@ impl<'de> de::Deserializer<'de> for Deserializer {
                 visitor.visit_f64(v)
             }
         } else if let Some(v) = self.value.as_string() {
-            // In human-readable mode, try to parse pure numeric strings as integers first.
-            // This is essential for round-tripping u64 values serialized as strings
-            // (via serialize_large_number_types_as_strings). Without this, serde's internally
-            // tagged enums (which buffer content via deserialize_any) would store "1" as
-            // Content::String("1") instead of Content::I64(1), breaking u64 field deserialization.
-            //
-            // We only parse strings that are pure ASCII digits (with optional leading minus),
-            // so identifiers, base58/64 strings, etc. are unaffected.
-            if self.is_human_readable && !v.is_empty() {
-                let bytes = v.as_bytes();
-                let (is_negative, digits) = if bytes[0] == b'-' {
-                    (true, &bytes[1..])
-                } else {
-                    (false, bytes)
-                };
-                let all_digits = !digits.is_empty() && digits.iter().all(|b| b.is_ascii_digit());
-                if all_digits {
-                    if is_negative {
-                        if let Ok(n) = v.parse::<i64>() {
-                            return visitor.visit_i64(n);
-                        }
-                    } else {
-                        if let Ok(n) = v.parse::<u64>() {
-                            if n <= i64::MAX as u64 {
-                                return visitor.visit_i64(n as i64);
-                            } else {
-                                return visitor.visit_u64(n);
-                            }
-                        }
-                    }
-                }
-            }
             visitor.visit_string(v)
         } else if Array::is_array(&self.value) {
             self.deserialize_seq(visitor)
